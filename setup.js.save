@@ -1,0 +1,107 @@
+cd ~/mpda-system && mkdir -p src/lib src/components "src/app/admin/new" "src/app/admin/[id]" "src/app/profile/[id]" "src/app/api/dancers/[id]" src/app/api/upload src/app/api/migrate
+
+cat > src/lib/schema.ts << 'EOF'
+import { pgTable, text, integer, timestamp } from 'drizzle-orm/pg-core';
+export const dancers = pgTable('dancers', {
+  id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+  name: text('name').notNull(),
+  phone: text('phone').notNull(),
+  imageUrl: text('image_url'),
+  skillScore: integer('skill_score').notNull().default(0),
+  privateScore: integer('private_score').notNull().default(0),
+  attitudeScore: integer('attitude_score').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+export type Dancer = typeof dancers.$inferSelect;
+export type NewDancer = typeof dancers.$inferInsert;
+EOF
+
+cat > src/lib/db.ts << 'EOF'
+import { neon } from '@neondatabase/serverless';
+import { drizzle } from 'drizzle-orm/neon-http';
+import * as schema from './schema';
+const sql = neon(process.env.DATABASE_URL!);
+export const db = drizzle(sql, { schema });
+EOF
+
+cat > src/app/page.tsx << 'EOF'
+import { redirect } from 'next/navigation';
+export default function Home() { redirect('/admin'); }
+EOF
+
+cat > src/app/layout.tsx << 'EOF'
+import type { Metadata } from "next";
+import "./globals.css";
+export const metadata: Metadata = { title: "MPDA", description: "Мэргэжлийн гэрчилгээний систем" };
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  return (<html lang="mn" className="h-full antialiased"><body className="min-h-full flex flex-col">{children}</body></html>);
+}
+EOF
+
+cat > src/app/api/migrate/route.ts << 'EOF'
+import { NextResponse } from 'next/server';
+import { neon } from '@neondatabase/serverless';
+export async function GET() {
+  const sql = neon(process.env.DATABASE_URL!);
+  await sql`CREATE TABLE IF NOT EXISTS dancers (id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT NOT NULL, image_url TEXT, skill_score INTEGER NOT NULL DEFAULT 0, private_score INTEGER NOT NULL DEFAULT 0, attitude_score INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP NOT NULL DEFAULT NOW())`;
+  return NextResponse.json({ success: true });
+}
+EOF
+
+cat > src/app/api/dancers/route.ts << 'EOF'
+import { NextRequest, NextResponse } from 'next/server';
+import { db } from '@/lib/db';
+import { dancers } from '@/lib/schema';
+import { desc } from 'drizzle-orm';
+export async function GET() {
+  try { return NextResponse.json(await db.select().from(dancers).orderBy(desc(dancers.createdAt))); }
+  catch { return NextResponse.json({ error: 'Failed' }, { status: 500 }); }
+}
+export async function POST(req: NextRequest) {
+  try {
+    const { name, phone, imageUrl, skillScore, privateScore, attitudeScore } = await req.json();
+    if (!name || !phone) return NextResponse.json({ error: 'Нэр болон утас шаардлагатай' }, { status: 400 });
+    const [dancer] = await db.insert(dancers).values({ name, phone, imageUrl: imageUrl || null, skillScore: Number(skillScore)||0, privateScore: Number(privateScore)||0, attitudeScore: Number(attitudeScore)||0 }).returning();
+    return NextResponse.json(dancer, { status: 201 });
+  } catch { return NextResponse.json({ error: 'Failed' }, { status: 500 }); }
+}
+EOF
+
+cat > "src/app/api/dancers/[id]/route.ts" << 'EOF'
+import { NextRequest, NextResponse } from 'next/server';
+import { db } from '@/lib/db';
+import { dancers } from '@/lib/schema';
+import { eq } from 'drizzle-orm';
+export async function GET(_: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const [d] = await db.select().from(dancers).where(eq(dancers.id, id));
+  if (!d) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  return NextResponse.json(d);
+}
+export async function DELETE(_: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  await db.delete(dancers).where(eq(dancers.id, id));
+  return NextResponse.json({ success: true });
+}
+EOF
+
+cat > src/app/api/upload/route.ts << 'EOF'
+import { NextRequest, NextResponse } from 'next/server';
+import { v2 as cloudinary } from 'cloudinary';
+cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, api_secret: process.env.CLOUDINARY_API_SECRET });
+export async function POST(req: NextRequest) {
+  try {
+    const file = (await req.formData()).get('file') as File;
+    if (!file) return NextResponse.json({ error: 'No file' }, { status: 400 });
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const result = await new Promise<{ secure_url: string }>((resolve, reject) => {
+      cloudinary.uploader.upload_stream({ folder: 'mpda-dancers', transformation: [{ width: 400, height: 400, crop: 'fill' }] }, (e, r) => e ? reject(e) : resolve(r as any)).end(buffer);
+    });
+    return NextResponse.json({ url: result.secure_url });
+  } catch { return NextResponse.json({ error: 'Upload failed' }, { status: 500 }); }
+}
+EOF
+
+echo "✓ 1-р хэсэг бэлэн!"
+
+
